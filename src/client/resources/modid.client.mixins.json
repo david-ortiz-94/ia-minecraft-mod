@@ -1,9 +1,9 @@
 {
 	"required": true,
-	"package": "com.example.mixin.client",
+	"package": "com.minecraftmods.mcia.mixin.client",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
-		"ExampleClientMixin"
+      "McAiGeminiClientMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -16,10 +16,11 @@
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.example.ExampleMod"
+          "com.minecraftmods.mcia.MainMod",
+			"com.minecraftmods.mcia.test.TestMod"
 		],
 		"client": [
-			"com.example.ExampleModClient"
+			"com.minecraftmods.mcia.McAiGeminiClient"
 		]
 	},
 	"mixins": [
