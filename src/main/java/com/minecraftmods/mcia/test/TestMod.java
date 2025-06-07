@@ -1,10 +1,8 @@
 package com.minecraftmods.mcia.test;
 
 
-import com.minecraftmods.mcia.commands.GeneratorCommand;
 import com.minecraftmods.mcia.generation.builders.StructureBuilder;
 import com.mojang.brigadier.CommandDispatcher;
-import com.mojang.brigadier.StringReader;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
@@ -15,18 +13,14 @@ import com.mojang.brigadier.tree.LiteralCommandNode;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.server.command.ServerCommandSource;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec2f;
 import net.minecraft.util.math.Vec3d;
-
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
 
 public class TestMod implements ModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("MCIA-Test");
@@ -58,12 +52,12 @@ public class TestMod implements ModInitializer {
 
 // Replace "generar" with your actual command name
                 // Create a dummy command node
-                LiteralCommandNode<ServerCommandSource> generarNode  = LiteralArgumentBuilder
+                LiteralCommandNode<ServerCommandSource> generarNode = LiteralArgumentBuilder
                         .<ServerCommandSource>literal("generar")
                         .then(RequiredArgumentBuilder.argument("description", StringArgumentType.string()))
                         .executes(context -> 0).build();
                 // 3. Prepare the description
-                String description = "una casa japonesa moderna";
+                String description = "una casa de piedra";
                 // Calculate positions (assuming the argument starts after "generar ")
                 int start = "generar ".length(); // Start after command prefix
                 int end = start + description.length();

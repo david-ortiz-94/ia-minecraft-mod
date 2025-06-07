@@ -1,26 +1,38 @@
 package com.minecraftmods.mcia.nlp;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.minecraftmods.mcia.generation.models.StructureDesign;
+import com.minecraftmods.mcia.utils.PromptUtils;
+import com.sk89q.worldedit.EditSession;
+import com.sk89q.worldedit.MaxChangedBlocksException;
+import com.sk89q.worldedit.WorldEdit;
 import com.sk89q.worldedit.extent.clipboard.BlockArrayClipboard;
+import com.sk89q.worldedit.extent.clipboard.Clipboard;
 import com.sk89q.worldedit.math.BlockVector3;
 import com.sk89q.worldedit.regions.CuboidRegion;
-import com.sk89q.worldedit.world.block.BaseBlock;
 import com.sk89q.worldedit.world.block.BlockState;
 import com.sk89q.worldedit.world.block.BlockType;
 import com.sk89q.worldedit.world.block.BlockTypes;
 import io.github.amithkoujalgi.ollama4j.core.OllamaAPI;
-import io.github.amithkoujalgi.ollama4j.core.models.chat.*;
-import com.google.gson.*;
-import com.sk89q.worldedit.*;
-import com.sk89q.worldedit.extent.clipboard.Clipboard;
-import com.sk89q.worldedit.extent.clipboard.io.*;
+import io.github.amithkoujalgi.ollama4j.core.models.chat.OllamaChatMessage;
+import io.github.amithkoujalgi.ollama4j.core.models.chat.OllamaChatMessageRole;
+import io.github.amithkoujalgi.ollama4j.core.models.chat.OllamaChatRequestModel;
+import io.github.amithkoujalgi.ollama4j.core.models.chat.OllamaChatResult;
 import org.jetbrains.annotations.NotNull;
 
-import java.io.*;
+import java.io.IOException;
+import java.net.http.HttpTimeoutException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class OllamaStructureGenerator {
     private static final String MODEL_NAME = "llama3.2:latest";
@@ -28,15 +40,9 @@ public class OllamaStructureGenerator {
     private static final OllamaAPI ollama = new OllamaAPI("http://localhost:11434/");
     private static final ExecutorService executor = Executors.newCachedThreadPool();
     private static final int MAX_RETRIES = 3;
-    private static final long INITIAL_TIMEOUT_SECONDS = 60;
+    private static final long INITIAL_TIMEOUT_SECONDS = 90;
     private static final long BACKOFF_MULTIPLIER = 2;
-    private static final Map<String, String> BLOCK_CORRECTIONS = Map.of(
-            "wooden_door", "oak_door",
-            "cedar_log", "spruce_log",
-            "spruce_logs", "spruce_log",
-            "red_stone_bricks", "red_bricks",
-            "moisture_resistant_cobblestone", "mossy_cobblestone"
-    );
+
     public OllamaStructureGenerator() {
         configureOllama();
     }
@@ -53,75 +59,70 @@ public class OllamaStructureGenerator {
 
             while (attempt < MAX_RETRIES) {
                 try {
-                    // Calculate timeout with exponential backoff
                     long timeout = INITIAL_TIMEOUT_SECONDS * (long) Math.pow(BACKOFF_MULTIPLIER, attempt);
-                    ollama.setRequestTimeoutSeconds(timeout);
+                    ollama.setRequestTimeoutSeconds(timeout); // ← Aumenta timeout en cada intento
 
-                    // 1. Get structure design
-                    JsonObject structureDesign = getStructureDesign(description);
+                    StructureDesign design = getStructureDesign(description);
+                    return buildClipboard(design.getRawDesign());
 
-                    // 2. Create clipboard
-                    Clipboard clipboard = createClipboard(structureDesign);
-
-                    // 3. Build structure
-                    buildStructure(clipboard, structureDesign);
-
-                    return clipboard;
-                } catch (Exception e) {
+                } catch (HttpTimeoutException e) {
                     lastException = e;
                     attempt++;
                     if (attempt < MAX_RETRIES) {
                         try {
-                            Thread.sleep(1000 * attempt); // Wait before retry
+                            Thread.sleep(1000L * attempt); // Backoff exponencial
                         } catch (InterruptedException ie) {
                             Thread.currentThread().interrupt();
-                            throw new CompletionException("Interrupted during retry", ie);
+                            throw new CompletionException(ie);
                         }
                     }
+                } catch (Exception e) {
+                    throw new CompletionException(e);
                 }
             }
 
-            throw new CompletionException("Failed after " + MAX_RETRIES + " attempts", lastException);
+            throw new CompletionException("Falló después de " + MAX_RETRIES + " intentos", lastException);
         }, executor);
     }
 
-    private static JsonObject getStructureDesign(String description) throws Exception {
-        String systemPrompt = """
-Eres un generador de estructuras para Minecraft 1.21.5. Reglas estrictas:
-1. Usa SOLO bloques existentes en Minecraft 1.21.5 (ej: minecraft:oak_planks, minecraft:stone_bricks)
-2. MÍNIMO 15 bloques sólidos (no usar solo vidrios o plantas)
-3. Incluir al menos 3 tipos diferentes de bloques estructurales
-4. La estructura debe tener volumen (ancho, alto y profundidad >= 3)
-5. NO uses bloques como wooden_door o cedar_log - usa oak_door y spruce_log en su lugar
-6. La respuesta debe ser EXCLUSIVAMENTE un objeto JSON válido
-7. No incluyas ningún texto adicional fuera del JSON
-8. Ejemplo de JSON válido:
-{
-  "dimensions": {"width": 5, "height": 4, "length": 5},
-  "blocks": {
-    "0,0,0": "minecraft:oak_planks",
-    "0,1,0": "minecraft:oak_log",
-    "1,0,0": "minecraft:stone_bricks",
-    "0,0,1": "minecraft:glass_pane",
-    // ... mínimo 15 bloques
-  },
-  "metadata": {
-    "type": "house",
-    "style": "modern"
-  }
-}
-9. ¡NO USAR SOLO VIDRIOS! Combinar con bloques estructurales
-""";
 
-        OllamaChatRequestModel request = getOllamaChatRequestModel(description, systemPrompt);
+    private static StructureDesign getStructureDesign(String description) throws Exception {
+
+
+        OllamaChatRequestModel request = getOllamaChatRequestModel(description);
 
         OllamaChatResult result = ollama.chat(request);
-        return parseResponse(result);
+        JsonObject response = parseResponse(result);
+
+        // Validación básica del JSON antes de continuar
+        if (!response.has("dimensions") || !response.has("blocks")) {
+            throw new IOException("El JSON no contiene dimensions o blocks");
+        }
+
+        improveStructure(response); // Aplicar post-procesamiento
+        return new StructureDesign(response);
     }
 
-    private static @NotNull OllamaChatRequestModel getOllamaChatRequestModel(String description, String systemPrompt) {
+    private static void improveStructure(JsonObject design) {
+        // Asegurar dimensiones mínimas
+        JsonObject dims = design.getAsJsonObject("dimensions");
+        dims.addProperty("width", Math.max(7, dims.get("width").getAsInt()));
+        dims.addProperty("height", Math.max(5, dims.get("height").getAsInt()));
+        dims.addProperty("length", Math.max(7, dims.get("length").getAsInt()));
+
+        // Añadir piso si no existe
+        for(int x=0; x<dims.get("width").getAsInt(); x++) {
+            for(int z=0; z<dims.get("length").getAsInt(); z++) {
+                String key = x+",0,"+z;
+                if(!design.getAsJsonObject("blocks").has(key)) {
+                    design.getAsJsonObject("blocks").addProperty(key, "minecraft:oak_planks");
+                }
+            }
+        }
+    }
+    private static @NotNull OllamaChatRequestModel getOllamaChatRequestModel(String description) {
         OllamaChatMessage systemMessage = new OllamaChatMessage(
-                OllamaChatMessageRole.SYSTEM, systemPrompt
+                OllamaChatMessageRole.SYSTEM, PromptUtils.SYSTEM_PROMPT
         );
 
         OllamaChatMessage userMessage = new OllamaChatMessage(
@@ -168,7 +169,26 @@ Eres un generador de estructuras para Minecraft 1.21.5. Reglas estrictas:
     }
 
     private static String extractJsonContent(String rawResponse) {
-        // Caso 1: Respuesta contiene ```json ... ```
+        // First try to find complete JSON object
+        int jsonStart = rawResponse.indexOf('{');
+        int jsonEnd = rawResponse.lastIndexOf('}');
+
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            String potentialJson = rawResponse.substring(jsonStart, jsonEnd + 1);
+
+            // Remove inline comments
+            potentialJson = potentialJson.replaceAll("//.*", "");
+
+            try {
+                // Validate it's proper JSON
+                gson.fromJson(potentialJson, JsonObject.class);
+                return potentialJson;
+            } catch (Exception e) {
+                // Continue to other methods if this fails
+            }
+        }
+
+        // Fallback to original methods
         if (rawResponse.contains("```json")) {
             int start = rawResponse.indexOf("```json") + "```json".length();
             int end = rawResponse.lastIndexOf("```");
@@ -177,102 +197,88 @@ Eres un generador de estructuras para Minecraft 1.21.5. Reglas estrictas:
             }
         }
 
-        // Caso 2: Respuesta es directamente un objeto JSON
-        if (rawResponse.trim().startsWith("{") && rawResponse.trim().endsWith("}")) {
-            return rawResponse.trim();
-        }
-
-        // Caso 3: Buscar el primer objeto JSON en el texto
-        int jsonStart = rawResponse.indexOf('{');
-        int jsonEnd = rawResponse.lastIndexOf('}');
-        if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            return rawResponse.substring(jsonStart, jsonEnd + 1);
-        }
-
-        return null;
+        return rawResponse.trim();
     }
 
-    private static Clipboard createClipboard(JsonObject design) throws Exception {
+    private static Clipboard buildClipboard(JsonObject design) throws MaxChangedBlocksException {
+        // 1. Obtener dimensiones
+        if (!design.has("dimensions")) {
+            throw new IllegalArgumentException("El diseño no contiene dimensiones");
+        }
         JsonObject dims = design.getAsJsonObject("dimensions");
+        int width = dims.get("width").getAsInt();
+        int height = dims.get("height").getAsInt();
+        int length = dims.get("length").getAsInt();
+
+        // 2. Crear región
         BlockVector3 min = BlockVector3.at(0, 0, 0);
         BlockVector3 max = BlockVector3.at(
-                dims.get("width").getAsInt() - 1,
-                dims.get("height").getAsInt() - 1,
-                dims.get("length").getAsInt() - 1
+                Math.max(0, width-1),  // Asegurar que no sea negativo
+                Math.max(0, height-1),
+                Math.max(0, length-1)
         );
-        return new BlockArrayClipboard(new CuboidRegion(min, max));
-    }
-
-    private static void buildStructure(Clipboard clipboard, JsonObject design) {
+        CuboidRegion region = new CuboidRegion(min, max);
+        BlockArrayClipboard clipboard = new BlockArrayClipboard(region);
+        // 3. Configurar bloques DIRECTAMENTE en el clipboard (sin EditSession)
         JsonObject blocks = design.getAsJsonObject("blocks");
-        try (EditSession editSession = WorldEdit.getInstance().newEditSession(clipboard.getRegion().getWorld())) {
-            blocks.entrySet().forEach(entry -> {
+        // Debug: Print all blocks from JSON
+        System.out.println("=== BLOCKS FROM JSON ===");
+        blocks.entrySet().forEach(entry ->
+                System.out.println(entry.getKey() + ": " + entry.getValue()));
+
+        for (Map.Entry<String, JsonElement> entry : blocks.entrySet()) {
+            try {
                 String[] coords = entry.getKey().split(",");
-                if (coords.length != 3) {
-                    throw new RuntimeException("Coordenadas inválidas: " + entry.getKey());
+                int x = Integer.parseInt(coords[0].trim());
+                int y = Integer.parseInt(coords[1].trim());
+                int z = Integer.parseInt(coords[2].trim());
+
+                // Validar coordenadas
+                if (x >= width || y >= height || z >= length) {
+                    System.err.printf("Coordenada (%d,%d,%d) excede dimensiones (%d,%d,%d)%n",
+                            x, y, z, width, height, length);
+                    continue;
                 }
-                BlockVector3 pos = BlockVector3.at(
-                        Integer.parseInt(coords[0]),
-                        Integer.parseInt(coords[1]),
-                        Integer.parseInt(coords[2])
-                );
-                try {
-                    editSession.setBlock(pos, parseBlock(entry.getValue().getAsString()));
-                } catch (MaxChangedBlocksException  e) {
-                    throw new RuntimeException("Error al colocar bloque en " + entry.getKey() +
-                            " (" + entry.getValue().getAsString() + "): " + e.getMessage(), e);
-                }
-            });
-        } catch (Exception e) {
-            throw new RuntimeException("Error al construir estructura: " + e.getMessage(), e);
+
+                String blockId = entry.getValue().getAsString();
+                BlockState block = parseBlock(blockId);
+
+                // DEBUG: Verificar bloque antes de colocarlo
+                System.out.printf("Colocando %s en (%d,%d,%d)%n", blockId, x, y, z);
+
+                // Colocar directamente en el clipboard
+                clipboard.setBlock(BlockVector3.at(x, y, z), block);
+
+            } catch (Exception e) {
+                System.err.println("Error procesando bloque " + entry.getKey() + ": " + e.getMessage());
+            }
         }
+
+        return clipboard;
+
     }
+
     private static BlockState parseBlock(String blockId) {
-        // Aplicar correcciones primero
-        String correctedId = BLOCK_CORRECTIONS.getOrDefault(
-                blockId.replace("minecraft:", ""),
-                blockId
-        );
-
-        // Eliminar propiedades adicionales
-        String baseBlockId = correctedId.split("\\[")[0];
-
-        BlockType blockType = BlockTypes.get(baseBlockId);
-        if (blockType == null) {
-            throw new IllegalArgumentException("Bloque no encontrado: " + baseBlockId);
-        }
-
-        return blockType.getDefaultState();
-    }
-    private static BlockState parseBlock2(String blockId) {
         try {
-            // Elimina propiedades adicionales (ej: "minecraft:oak_planks[axis=x]" → "minecraft:oak_planks")
-            String baseBlockId = blockId.split("\\[")[0];
-            // Mapeo de bloques sugeridos por Ollama a bloques válidos
-            Map<String, String> blockMappings = Map.of(
-                    "iron_brick", "minecraft:iron_block",
-                    "dark_stone", "minecraft:blackstone",
-                    "wooden_door", "minecraft:oak_door",
-                    "cedar_log", "minecraft:spruce_log"
-            );
-            // Reemplaza bloques inválidos
-            // Reemplaza bloques inválidos
-            baseBlockId = blockMappings.getOrDefault(
-                    baseBlockId.replace("minecraft:", ""),
-                    baseBlockId
-            );
-
-
-            // Obtiene el tipo de bloque (ej: "minecraft:stone")
-            BlockType blockType = BlockTypes.get(baseBlockId);
-            if (blockType == null) {
-                throw new IllegalArgumentException("Bloque no encontrado: " + baseBlockId);
+            // Asegurar que el ID incluya el namespace
+            if (!blockId.startsWith("minecraft:")) {
+                blockId = "minecraft:" + blockId;
             }
 
-            // Retorna el estado predeterminado del bloque
+            // Eliminar propiedades adicionales
+            String baseBlockId = blockId.split("\\[")[0].trim();
+            BlockType blockType = BlockTypes.get(baseBlockId);
+
+            if (blockType == null) {
+                System.err.println("Bloque no encontrado: " + baseBlockId);
+                return BlockTypes.STONE.getDefaultState(); // Fallback
+            }
+
             return blockType.getDefaultState();
         } catch (Exception e) {
-            throw new RuntimeException("Error al parsear bloque: " + blockId, e);
+            System.err.println("Error al parsear bloque: " + blockId);
+            return BlockTypes.STONE.getDefaultState();
         }
     }
+
 }
